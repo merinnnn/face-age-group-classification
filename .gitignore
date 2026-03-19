@@ -1,0 +1,10 @@
+# Datasets
+CW_Dataset
+Personal_Dataset
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
+
+.DS_Store
