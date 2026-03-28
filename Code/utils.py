@@ -39,6 +39,7 @@ def set_seed(seed=RANDOM_SEED):
 set_seed()
 
 def load_dataset(data_dir, label_file):
+    """Load dataset paths and labels from a label file."""
     with open(label_file, 'r') as f:
         rows = [l.strip().split() for l in f if l.strip()]
     paths, labels = [], []
@@ -49,10 +50,44 @@ def load_dataset(data_dir, label_file):
 
 # Preprocess image for classical models
 def load_image(path, size=IMAGE_SIZE):
+    """Load and preprocess an image for classical models."""
     img = cv2.imread(path)
     if img is None:
         raise IOError(f"Cannot read: {path}")
     img = cv2.resize(img, size)
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+# Feature extractors
+def extract_hog(path, size=IMAGE_SIZE):
+    """HOG feature descriptor."""
+    img = load_image(path, size)
+    features = hog(img,
+                   orientations=9,
+                   pixels_per_cell=(16, 16),
+                   cells_per_block=(2, 2),
+                   block_norm='L2-Hys',
+                   feature_vector=True)
+    return features
 
+def extract_lbp(path, size=IMAGE_SIZE, P=24, R=3):
+    """LBP feature descriptor."""
+    img = load_image(path, size=size, grayscale=True)
+    lbp = local_binary_pattern(img, P=P, R=R, method='uniform')
+    hist, _ = np.histogram(lbp.ravel(), bins=P + 2,
+                           range=(0, P + 2), density=True)
+    return hist
+
+def extract_hog_lbp(path, size=IMAGE_SIZE):
+    """Combined HOG + LBP features."""
+    hog_features = extract_hog(path, size)
+    lbp_features = extract_lbp(path, size)
+    return np.concatenate((hog_features, lbp_features))
+
+def batch_extract(paths, extractor, label=""):
+    """Extract features for a list of paths with progress printing."""
+    out, n = [], len(paths)
+    for i, p in enumerate(paths):
+        if i % 1000 == 0:
+            print(f"  {label}: {i}/{n}")
+        out.append(extractor(p))
+    return np.array(out)
