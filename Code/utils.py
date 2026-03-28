@@ -95,7 +95,6 @@ def batch_extract(paths, extractor, label=""):
 # SVM training
 def train_linear_SVM(X_train, y_train):
     """Train a linear SVM classifier."""
-    print("Training Linear SVM...")
     classifier = svm.SVC(kernel='linear', class_weight='balanced')
     classifier.fit(X_train, y_train)
     return classifier
@@ -104,5 +103,19 @@ def train_rbf_SVM(X_train, y_train, C=10):
     """Train an RBF-kernel SVM classifier."""
     classifier = svm.SVC(kernel='rbf', C=C, gamma='scale',
                          class_weight='balanced', random_state=SEED)
+    classifier.fit(X_train, y_train)
+    return classifier
+
+# MLP training
+def train_MLP(X_train, y_train, hidden_layer_sizes=(512, 256), max_iter=100):
+    """Train a Multi-layer Perceptron classifier."""
+    classifier = MLPClassifier(
+        hidden_layer_sizes=hidden_layer_sizes,
+        activation='relu',
+        solver='adam',
+        max_iter=max_iter,
+        early_stopping=True,
+        random_state=SEED
+    )
     classifier.fit(X_train, y_train)
     return classifier
