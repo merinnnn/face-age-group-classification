@@ -44,18 +44,28 @@ def load_dataset(data_dir, label_file):
         rows = [l.strip().split() for l in f if l.strip()]
     paths, labels = [], []
     for path, label in rows:
-        paths.append(os.path.join(data_dir, path))
-        labels.append(int(label))
+        path = os.path.basename(path)   # strip any subfolder prefix
+        p = os.path.join(data_dir, path)
+        if os.path.exists(p):
+            paths.append(p)
+            labels.append(int(label))
     return paths, labels
 
 # Preprocess image for classical models
-def load_image(path, size=IMAGE_SIZE):
-    """Load and preprocess an image for classical models."""
-    img = cv2.imread(path)
-    if img is None:
-        raise IOError(f"Cannot read: {path}")
-    img = cv2.resize(img, size)
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+def load_image(path, size=IMAGE_SIZE, grayscale=False):
+    """Load and resize image."""
+    if grayscale:
+        # Read directly as grayscale to guarantee 2D array for HOG
+        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise IOError(f"Cannot read: {path}")
+        return cv2.resize(img, size)
+    else:
+        img = cv2.imread(path)
+        if img is None:
+            raise IOError(f"Cannot read: {path}")
+        img = cv2.resize(img, size)
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 # Feature extractors
 def extract_hog(path, size=IMAGE_SIZE):
@@ -73,8 +83,9 @@ def extract_lbp(path, size=IMAGE_SIZE, P=24, R=3):
     """LBP feature descriptor."""
     img = load_image(path, size=size, grayscale=True)
     lbp = local_binary_pattern(img, P=P, R=R, method='uniform')
-    hist, _ = np.histogram(lbp.ravel(), bins=P + 2,
-                           range=(0, P + 2), density=True)
+    n_bins = P + 2
+    hist, _ = np.histogram(lbp.ravel(), bins=n_bins,
+                           range=(0, n_bins), density=True)
     return hist
 
 def extract_hog_lbp(path, size=IMAGE_SIZE):
@@ -85,7 +96,8 @@ def extract_hog_lbp(path, size=IMAGE_SIZE):
 
 def batch_extract(paths, extractor, label=""):
     """Extract features for a list of paths with progress printing."""
-    out, n = [], len(paths)
+    out = []
+    n = len(paths)
     for i, p in enumerate(paths):
         if i % 1000 == 0:
             print(f"  {label}: {i}/{n}")
