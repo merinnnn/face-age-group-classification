@@ -76,7 +76,8 @@ def extract_hog(path, size=IMAGE_SIZE):
                    pixels_per_cell=(16, 16),
                    cells_per_block=(2, 2),
                    block_norm='L2-Hys',
-                   feature_vector=True)
+                   feature_vector=True,
+                   channel_axis=-1)
     return features
 
 def extract_lbp(path, size=IMAGE_SIZE, P=24, R=3):
