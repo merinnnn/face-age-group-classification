@@ -179,3 +179,17 @@ def qualitative_grid(test_paths, test_labels, predictions_dict, n=8):
         ax.set_title("\n".join(lines), fontsize=7, loc='left')
     plt.tight_layout()
     plt.show()
+
+# Class weights
+def get_class_weights(labels):
+    """Compute balanced class weights to handle imbalance."""
+    arr = np.array(labels)
+    classes = np.unique(arr)
+    w = compute_class_weight('balanced', classes=classes, y=arr)
+    return dict(zip(classes, w))
+
+# Scaler helper
+def fit_scaler(X_tr, X_val, X_te):
+    """Fit a StandardScaler on training data and apply to val/test."""
+    sc = StandardScaler()
+    return sc.fit_transform(X_tr), sc.transform(X_val), sc.transform(X_te), sc
