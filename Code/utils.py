@@ -23,14 +23,14 @@ import torchvision.transforms as transforms
 from torch.utils.data import Dataset
 
 # CONSTANTS
-RANDOM_SEED = 42
+SEED = 42
 IMAGE_SIZE  = (128, 128)    # default for classical models   
 CNN_SIZE    = (244, 244)    # VGG/ResNet
 AGE_LABELS  = {0:"Child", 1:"Young", 2:"Middle-Aged", 3:"Senior"}
 NUM_CLASSES = 4
 
 # Set all seeds
-def set_seed(seed=RANDOM_SEED):
+def set_seed(seed=SEED):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -91,3 +91,18 @@ def batch_extract(paths, extractor, label=""):
             print(f"  {label}: {i}/{n}")
         out.append(extractor(p))
     return np.array(out)
+
+# SVM training
+def train_linear_SVM(X_train, y_train):
+    """Train a linear SVM classifier."""
+    print("Training Linear SVM...")
+    classifier = svm.SVC(kernel='linear', class_weight='balanced')
+    classifier.fit(X_train, y_train)
+    return classifier
+
+def train_rbf_SVM(X_train, y_train, C=10):
+    """Train an RBF-kernel SVM classifier."""
+    classifier = svm.SVC(kernel='rbf', C=C, gamma='scale',
+                         class_weight='balanced', random_state=SEED)
+    classifier.fit(X_train, y_train)
+    return classifier
