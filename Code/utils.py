@@ -119,3 +119,50 @@ def train_MLP(X_train, y_train, hidden_layer_sizes=(512, 256), max_iter=100):
     )
     classifier.fit(X_train, y_train)
     return classifier
+
+# Evaluation
+def evaluate(name, y_true, y_pred, train_time=None, model_path=None):
+    """Print accuracy and full classification report."""
+    acc = accuracy_score(y_true, y_pred)
+    print(f"Model: {name}")
+    if train_time:
+        print(f"Training Time: {train_time:.1f} seconds")
+    if model_path and os.path.exists(model_path):
+        size = os.path.getsize(model_path) / (1024 * 1024)
+        print(f"Model Size: {size:.2f} MB")
+    print(f"Accuracy: {acc:.4f}")
+    print("Classification Report:")
+    print(metrics.classification_report(
+        y_true, y_pred,
+        target_names=[AGE_LABELS[i] for i in range(4)]
+    ))
+    return acc
+
+def plot_confusion_matrix(name, y_true, y_pred, ax=None):
+    """Plot a labelled confusion matrix."""
+    cm = confusion_matrix(y_true, y_pred)
+    disp = ConfusionMatrixDisplay(
+        cm, display_labels=[AGE_LABELS[i] for i in range(4)]
+    )
+    disp.plot(ax=ax or plt.gca(), colorbar=False, xticks_rotation=30)
+    if ax:
+        ax.set_title(name)
+
+def qualitative_grid(test_paths, test_labels, predictions_dict, n=8):
+    """Show n random test images with GT + all model predictions."""
+    idxs = random.sample(range(len(test_paths)), n)
+    ncols = 4
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 4.5))
+    for ax, idx in zip(axes.flatten(), idxs):
+        img = load_image(test_paths[idx])
+        ax.imshow(img)
+        ax.axis('off')
+        gt = AGE_LABELS[test_labels[idx]]
+        lines = [f"GT: {gt}"]
+        for mname, preds in predictions_dict.items():
+            mark = "✓" if preds[idx] == test_labels[idx] else "✗"
+            lines.append(f"{mark} {mname}: {AGE_LABELS[preds[idx]]}")
+        ax.set_title("\n".join(lines), fontsize=7, loc='left')
+    plt.tight_layout()
+    plt.show()
