@@ -193,3 +193,40 @@ def fit_scaler(X_tr, X_val, X_te):
     """Fit a StandardScaler on training data and apply to val/test."""
     sc = StandardScaler()
     return sc.fit_transform(X_tr), sc.transform(X_val), sc.transform(X_te), sc
+
+# PyTorch transforms
+def get_transforms(size=IMAGE_SIZE, augment=False):
+    """Build torchvision transform pipeline."""
+    mean = [0.485, 0.456, 0.406]
+    std  = [0.229, 0.224, 0.225]
+    if augment:
+        return transforms.Compose([
+            transforms.Resize(size),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+    return transforms.Compose([
+        transforms.Resize(size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
+# PyTorch Dataset
+class AgeDataset(Dataset):
+    """Custom PyTorch Dataset for Age Group Detection."""
+    def __init__(self, paths, labels, transform=None):
+        self.paths     = paths
+        self.labels    = labels
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.paths[idx]).convert('RGB')
+        if self.transform:
+            img = self.transform(img)
+        return img, self.labels[idx]
