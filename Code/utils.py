@@ -23,7 +23,7 @@ import torchvision.transforms as transforms
 from torch.utils.data import Dataset
 
 # CONSTANTS
-SEED = 42
+SEED = 104
 IMAGE_SIZE  = (128, 128)    # default for classical models   
 CNN_SIZE    = (244, 244)    # VGG/ResNet
 AGE_LABELS  = {0:"Child", 1:"Young", 2:"Middle-Aged", 3:"Senior"}
@@ -230,3 +230,67 @@ class AgeDataset(Dataset):
         if self.transform:
             img = self.transform(img)
         return img, self.labels[idx]
+
+# PyTorch training
+def train_epoch(model, loader, criterion, optimizer, device):
+    """Single training epoch: forward pass, loss, backward, optimiser step."""
+    model.train()
+    total_loss = 0
+    for imgs, lbls in loader:
+        imgs, lbls = imgs.to(device), lbls.to(device)
+        optimizer.zero_grad()
+        loss = criterion(model(imgs), lbls)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(loader)
+
+
+@torch.no_grad()
+def eval_epoch(model, loader, device):
+    """
+    Single evaluation epoch.
+    Returns (accuracy: float, predictions: np.ndarray).
+    """
+    model.eval()
+    correct = total = 0
+    all_preds = []
+    for imgs, lbls in loader:
+        imgs, lbls = imgs.to(device), lbls.to(device)
+        preds = model(imgs).argmax(1)
+        correct   += (preds == lbls).sum().item()
+        total     += lbls.size(0)
+        all_preds.extend(preds.cpu().numpy())
+    return correct / total, np.array(all_preds)
+
+
+def train_model(model, train_dl, val_dl, criterion, optimizer, scheduler,
+                num_epochs, device, save_path):
+    """Full training loop with best-model checkpointing (saved to save_path)."""
+    best_acc = 0
+    history  = {"loss": [], "val_acc": []}
+    for ep in range(num_epochs):
+        loss = train_epoch(model, train_dl, criterion, optimizer, device)
+        acc, _ = eval_epoch(model, val_dl, device)
+        if scheduler:
+            scheduler.step()
+        history["loss"].append(loss)
+        history["val_acc"].append(acc)
+        if acc > best_acc:
+            best_acc = acc
+            torch.save(model.state_dict(), save_path)
+        if (ep + 1) % 5 == 0:
+            print(f"  Ep {ep+1:>3}/{num_epochs}  "
+                  f"loss={loss:.4f}  val_acc={acc:.4f}  best={best_acc:.4f}")
+    print(f"\n  Best val acc: {best_acc:.4f}  ->  {save_path}")
+    return history
+
+
+def plot_history(history, title=""):
+    """Plot training loss and validation accuracy curves."""
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4))
+    a1.plot(history["loss"]); a1.set_title("Train Loss"); a1.set_xlabel("Epoch")
+    a2.plot(history["val_acc"]); a2.set_title("Val Accuracy"); a2.set_xlabel("Epoch")
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.show()
