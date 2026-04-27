@@ -1,0 +1,296 @@
+import os, random, time, joblib
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import cv2
+from PIL import Image
+from collections import Counter
+
+from skimage.feature import hog, local_binary_pattern
+from skimage import img_as_ubyte
+
+from sklearn import svm, metrics
+from sklearn.neural_network import MLPClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (accuracy_score, classification_report,
+                             confusion_matrix, ConfusionMatrixDisplay)
+from sklearn.utils.class_weight import compute_class_weight
+
+import torch
+import torchvision.transforms as transforms
+from torch.utils.data import Dataset
+
+# CONSTANTS
+SEED = 104
+IMAGE_SIZE  = (128, 128)    # default for classical models   
+CNN_SIZE    = (244, 244)    # VGG/ResNet
+AGE_LABELS  = {0:"Child", 1:"Young", 2:"Middle-Aged", 3:"Senior"}
+NUM_CLASSES = 4
+
+# Set all seeds
+def set_seed(seed=SEED):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+set_seed()
+
+def load_dataset(data_dir, label_file):
+    """Load dataset paths and labels from a label file."""
+    with open(label_file, 'r') as f:
+        rows = [l.strip().split() for l in f if l.strip()]
+    paths, labels = [], []
+    for path, label in rows:
+        path = os.path.basename(path)   # strip any subfolder prefix
+        p = os.path.join(data_dir, path)
+        if os.path.exists(p):
+            paths.append(p)
+            labels.append(int(label))
+    return paths, labels
+
+# Preprocess image for classical models
+def load_image(path, size=IMAGE_SIZE, grayscale=False):
+    """Load and resize image."""
+    if grayscale:
+        # Read directly as grayscale to guarantee 2D array for HOG
+        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise IOError(f"Cannot read: {path}")
+        return cv2.resize(img, size)
+    else:
+        img = cv2.imread(path)
+        if img is None:
+            raise IOError(f"Cannot read: {path}")
+        img = cv2.resize(img, size)
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+# Feature extractors
+def extract_hog(path, size=IMAGE_SIZE):
+    """HOG feature descriptor."""
+    img = load_image(path, size)
+    features = hog(img,
+                   orientations=9,
+                   pixels_per_cell=(16, 16),
+                   cells_per_block=(2, 2),
+                   block_norm='L2-Hys',
+                   feature_vector=True,
+                   channel_axis=-1)
+    return features
+
+def extract_lbp(path, size=IMAGE_SIZE, P=24, R=3):
+    """LBP feature descriptor."""
+    img = load_image(path, size=size, grayscale=True)
+    lbp = local_binary_pattern(img, P=P, R=R, method='uniform')
+    n_bins = P + 2
+    hist, _ = np.histogram(lbp.ravel(), bins=n_bins,
+                           range=(0, n_bins), density=True)
+    return hist
+
+def extract_hog_lbp(path, size=IMAGE_SIZE):
+    """Combined HOG + LBP features."""
+    hog_features = extract_hog(path, size)
+    lbp_features = extract_lbp(path, size)
+    return np.concatenate((hog_features, lbp_features))
+
+def batch_extract(paths, extractor, label=""):
+    """Extract features for a list of paths with progress printing."""
+    out = []
+    n = len(paths)
+    for i, p in enumerate(paths):
+        if i % 1000 == 0:
+            print(f"  {label}: {i}/{n}")
+        out.append(extractor(p))
+    return np.array(out)
+
+# SVM training
+def train_linear_SVM(X_train, y_train):
+    """Train a linear SVM classifier."""
+    classifier = svm.SVC(kernel='linear', class_weight='balanced')
+    classifier.fit(X_train, y_train)
+    return classifier
+
+def train_rbf_SVM(X_train, y_train, C=10):
+    """Train an RBF-kernel SVM classifier."""
+    classifier = svm.SVC(kernel='rbf', C=C, gamma='scale',
+                         class_weight='balanced', random_state=SEED)
+    classifier.fit(X_train, y_train)
+    return classifier
+
+# MLP training
+def train_MLP(X_train, y_train, hidden_layer_sizes=(512, 256), max_iter=100):
+    """Train a Multi-layer Perceptron classifier."""
+    classifier = MLPClassifier(
+        hidden_layer_sizes=hidden_layer_sizes,
+        activation='relu',
+        solver='adam',
+        max_iter=max_iter,
+        early_stopping=True,
+        random_state=SEED
+    )
+    classifier.fit(X_train, y_train)
+    return classifier
+
+# Evaluation
+def evaluate(name, y_true, y_pred, train_time=None, model_path=None):
+    """Print accuracy and full classification report."""
+    acc = accuracy_score(y_true, y_pred)
+    print(f"Model: {name}")
+    if train_time:
+        print(f"Training Time: {train_time:.1f} seconds")
+    if model_path and os.path.exists(model_path):
+        size = os.path.getsize(model_path) / (1024 * 1024)
+        print(f"Model Size: {size:.2f} MB")
+    print(f"Accuracy: {acc:.4f}")
+    print("Classification Report:")
+    print(metrics.classification_report(
+        y_true, y_pred,
+        target_names=[AGE_LABELS[i] for i in range(4)]
+    ))
+    return acc
+
+def plot_confusion_matrix(name, y_true, y_pred, ax=None):
+    """Plot a labelled confusion matrix."""
+    cm = confusion_matrix(y_true, y_pred)
+    disp = ConfusionMatrixDisplay(
+        cm, display_labels=[AGE_LABELS[i] for i in range(4)]
+    )
+    disp.plot(ax=ax or plt.gca(), colorbar=False, xticks_rotation=30)
+    if ax:
+        ax.set_title(name)
+
+def qualitative_grid(test_paths, test_labels, predictions_dict, n=8):
+    """Show n random test images with GT + all model predictions."""
+    idxs = random.sample(range(len(test_paths)), n)
+    ncols = 4
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 4.5))
+    for ax, idx in zip(axes.flatten(), idxs):
+        img = load_image(test_paths[idx])
+        ax.imshow(img)
+        ax.axis('off')
+        gt = AGE_LABELS[test_labels[idx]]
+        lines = [f"GT: {gt}"]
+        for mname, preds in predictions_dict.items():
+            mark = "✓" if preds[idx] == test_labels[idx] else "✗"
+            lines.append(f"{mark} {mname}: {AGE_LABELS[preds[idx]]}")
+        ax.set_title("\n".join(lines), fontsize=7, loc='left')
+    plt.tight_layout()
+    plt.show()
+
+# Class weights
+def get_class_weights(labels):
+    """Compute balanced class weights to handle imbalance."""
+    arr = np.array(labels)
+    classes = np.unique(arr)
+    w = compute_class_weight('balanced', classes=classes, y=arr)
+    return dict(zip(classes, w))
+
+# Scaler helper
+def fit_scaler(X_tr, X_val, X_te):
+    """Fit a StandardScaler on training data and apply to val/test."""
+    sc = StandardScaler()
+    return sc.fit_transform(X_tr), sc.transform(X_val), sc.transform(X_te), sc
+
+# PyTorch transforms
+def get_transforms(size=IMAGE_SIZE, augment=False):
+    """Build torchvision transform pipeline."""
+    mean = [0.485, 0.456, 0.406]
+    std  = [0.229, 0.224, 0.225]
+    if augment:
+        return transforms.Compose([
+            transforms.Resize(size),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+    return transforms.Compose([
+        transforms.Resize(size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
+# PyTorch Dataset
+class AgeDataset(Dataset):
+    """Custom PyTorch Dataset for Age Group Detection."""
+    def __init__(self, paths, labels, transform=None):
+        self.paths     = paths
+        self.labels    = labels
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.paths[idx]).convert('RGB')
+        if self.transform:
+            img = self.transform(img)
+        return img, self.labels[idx]
+
+# PyTorch training
+def train_epoch(model, loader, criterion, optimizer, device):
+    """Single training epoch: forward pass, loss, backward, optimiser step."""
+    model.train()
+    total_loss = 0
+    for imgs, lbls in loader:
+        imgs, lbls = imgs.to(device), lbls.to(device)
+        optimizer.zero_grad()
+        loss = criterion(model(imgs), lbls)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(loader)
+
+
+@torch.no_grad()
+def eval_epoch(model, loader, device):
+    """
+    Single evaluation epoch.
+    Returns (accuracy: float, predictions: np.ndarray).
+    """
+    model.eval()
+    correct = total = 0
+    all_preds = []
+    for imgs, lbls in loader:
+        imgs, lbls = imgs.to(device), lbls.to(device)
+        preds = model(imgs).argmax(1)
+        correct   += (preds == lbls).sum().item()
+        total     += lbls.size(0)
+        all_preds.extend(preds.cpu().numpy())
+    return correct / total, np.array(all_preds)
+
+
+def train_model(model, train_dl, val_dl, criterion, optimizer, scheduler,
+                num_epochs, device, save_path):
+    """Full training loop with best-model checkpointing (saved to save_path)."""
+    best_acc = 0
+    history  = {"loss": [], "val_acc": []}
+    for ep in range(num_epochs):
+        loss = train_epoch(model, train_dl, criterion, optimizer, device)
+        acc, _ = eval_epoch(model, val_dl, device)
+        if scheduler:
+            scheduler.step()
+        history["loss"].append(loss)
+        history["val_acc"].append(acc)
+        if acc > best_acc:
+            best_acc = acc
+            torch.save(model.state_dict(), save_path)
+        if (ep + 1) % 5 == 0:
+            print(f"  Ep {ep+1:>3}/{num_epochs}  "
+                  f"loss={loss:.4f}  val_acc={acc:.4f}  best={best_acc:.4f}")
+    print(f"\n  Best val acc: {best_acc:.4f}  ->  {save_path}")
+    return history
+
+
+def plot_history(history, title=""):
+    """Plot training loss and validation accuracy curves."""
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4))
+    a1.plot(history["loss"]); a1.set_title("Train Loss"); a1.set_xlabel("Epoch")
+    a2.plot(history["val_acc"]); a2.set_title("Val Accuracy"); a2.set_xlabel("Epoch")
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.show()
