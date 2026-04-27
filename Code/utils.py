@@ -1,296 +1,241 @@
-import os, random, time, joblib
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import cv2
-from PIL import Image
 from collections import Counter
+from pathlib import Path
+import random
 
-from skimage.feature import hog, local_binary_pattern
-from skimage import img_as_ubyte
-
-from sklearn import svm, metrics
-from sklearn.neural_network import MLPClassifier
+import cv2
+import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.cluster import MiniBatchKMeans
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import (accuracy_score, classification_report,
-                             confusion_matrix, ConfusionMatrixDisplay)
-from sklearn.utils.class_weight import compute_class_weight
+from skimage import color, exposure, img_as_float, img_as_ubyte, transform
+from skimage.io import imread
 
-import torch
-import torchvision.transforms as transforms
-from torch.utils.data import Dataset
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
 
-# CONSTANTS
-SEED = 104
-IMAGE_SIZE  = (128, 128)    # default for classical models   
-CNN_SIZE    = (244, 244)    # VGG/ResNet
-AGE_LABELS  = {0:"Child", 1:"Young", 2:"Middle-Aged", 3:"Senior"}
-NUM_CLASSES = 4
+AGE_LABELS = {
+    0: "Child",
+    1: "Young",
+    2: "Middle-Aged",
+    3: "Senior",
+}
 
-# Set all seeds
-def set_seed(seed=SEED):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+# ENVIRONMENT SETUP
 
-set_seed()
+def find_project_root(start=Path.cwd()):
+    """Find the coursework folder whether the notebook is run locally or in Colab."""
+    start = Path(start).resolve()
+    candidates = [start, *start.parents]
+    candidates.append(Path("/content/drive/MyDrive/CW_Folder_UG"))
 
-def load_dataset(data_dir, label_file):
-    """Load dataset paths and labels from a label file."""
-    with open(label_file, 'r') as f:
-        rows = [l.strip().split() for l in f if l.strip()]
-    paths, labels = [], []
-    for path, label in rows:
-        path = os.path.basename(path)   # strip any subfolder prefix
-        p = os.path.join(data_dir, path)
-        if os.path.exists(p):
-            paths.append(p)
+    for candidate in candidates:
+        if (candidate / "CW_Dataset").exists():
+            return candidate
+
+    raise FileNotFoundError(
+        "Could not find CW_Dataset. Check your notebook working directory or Drive path."
+    )
+
+def get_project_paths(root=None):
+    """Return the standard coursework paths used by the model notebooks."""
+    root = Path(root) if root is not None else find_project_root()
+    data_dir = root / "CW_Dataset"
+    code2_dir = root / "Code 2"
+    models_dir = root / "Models"
+    output_dir = code2_dir / "outputs"
+
+    models_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
+
+    return {
+        "ROOT": root,
+        "DATA_DIR": data_dir,
+        "TRAIN_IMGS": data_dir / "train",
+        "TRAIN_LBL": data_dir / "train" / "train_labels.txt",
+        "TEST_IMGS": data_dir / "test",
+        "TEST_LBL": data_dir / "test" / "test_labels.txt",
+        "MODELS_DIR": models_dir,
+        "OUTPUT_DIR": output_dir,
+    }
+
+# DATA LOADING
+
+def load_labels(image_dir, label_file):
+    """Load image paths and integer labels from a coursework label file."""
+    image_dir = Path(image_dir)
+    paths = []
+    labels = []
+
+    with open(label_file, "r", encoding="utf-8") as f:
+        for line in f:
+            filename, label = line.strip().split()
+            paths.append(image_dir / filename)
             labels.append(int(label))
+
     return paths, labels
 
-# Preprocess image for classical models
-def load_image(path, size=IMAGE_SIZE, grayscale=False):
-    """Load and resize image."""
-    if grayscale:
-        # Read directly as grayscale to guarantee 2D array for HOG
-        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            raise IOError(f"Cannot read: {path}")
-        return cv2.resize(img, size)
+def load_coursework_dataset(root=None, verbose=True):
+    """Load train/test paths and labels for the coursework dataset."""
+    paths = get_project_paths(root)
+    train_paths, train_labels = load_labels(paths["TRAIN_IMGS"], paths["TRAIN_LBL"])
+    test_paths, test_labels = load_labels(paths["TEST_IMGS"], paths["TEST_LBL"])
+
+    if verbose:
+        print("Train samples:", len(train_paths))
+        print("Test samples:", len(test_paths))
+        print("Train class distribution:", Counter(train_labels))
+        print("Test class distribution:", Counter(test_labels))
+
+    return train_paths, train_labels, test_paths, test_labels
+
+# DATA SPLITTING
+
+def make_validation_split(train_paths, train_labels, test_size=0.1, seed=SEED):
+    """Create a stratified train/validation split from the provided training set."""
+    return train_test_split(
+        train_paths,
+        train_labels,
+        test_size=test_size,
+        stratify=train_labels,
+        random_state=seed,
+    )
+
+# IMAGE PREPROCESSING
+
+def read_rgb(path):
+    """Load an image as RGB float in [0, 1].
+
+    Reference: repurposed from Lab_02 code cell 3 (imread)
+    and cell 12 (colour/dtype handling with skimage).
+    """
+    img = imread(path)
+
+    if img.ndim == 2:
+        img = color.gray2rgb(img)
+    elif img.shape[2] == 4:
+        img = img[:, :, :3]
+
+    return img_as_float(img)
+
+
+def resize_image(img, image_size):
+    """Resize while keeping intensities in [0, 1].
+
+    Reference: repurposed from Lab_05 code cell 20.
+    """
+    resized = transform.resize(
+        img,
+        image_size,
+        anti_aliasing=True,
+        preserve_range=True,
+    )
+    return np.clip(resized, 0, 1)
+
+def adjust_contrast(img, method=None, gamma=1.0):
+    """Apply optional contrast preprocessing.
+
+    Reference: repurposed from Lab_02 code cell 19.
+    """
+    if method is None:
+        return img
+
+    is_rgb = img.ndim == 3
+    work = img.copy()
+
+    if is_rgb:
+        hsv = color.rgb2hsv(work)
+        channel = hsv[:, :, 2]
     else:
-        img = cv2.imread(path)
-        if img is None:
-            raise IOError(f"Cannot read: {path}")
-        img = cv2.resize(img, size)
-        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        channel = work
 
-# Feature extractors
-def extract_hog(path, size=IMAGE_SIZE):
-    """HOG feature descriptor."""
-    img = load_image(path, size)
-    features = hog(img,
-                   orientations=9,
-                   pixels_per_cell=(16, 16),
-                   cells_per_block=(2, 2),
-                   block_norm='L2-Hys',
-                   feature_vector=True,
-                   channel_axis=-1)
-    return features
+    if method == "stretch":
+        p2, p98 = np.percentile(channel, (2, 98))
+        channel = exposure.rescale_intensity(channel, in_range=(p2, p98))
+    elif method == "equalize":
+        channel = exposure.equalize_hist(channel)
+    elif method == "gamma":
+        channel = exposure.adjust_gamma(channel, gamma=gamma)
+    else:
+        raise ValueError("method must be None, 'stretch', 'equalize', or 'gamma'")
 
-def extract_lbp(path, size=IMAGE_SIZE, P=24, R=3):
-    """LBP feature descriptor."""
-    img = load_image(path, size=size, grayscale=True)
-    lbp = local_binary_pattern(img, P=P, R=R, method='uniform')
-    n_bins = P + 2
-    hist, _ = np.histogram(lbp.ravel(), bins=n_bins,
-                           range=(0, n_bins), density=True)
-    return hist
+    if is_rgb:
+        hsv[:, :, 2] = channel
+        return np.clip(color.hsv2rgb(hsv), 0, 1)
 
-def extract_hog_lbp(path, size=IMAGE_SIZE):
-    """Combined HOG + LBP features."""
-    hog_features = extract_hog(path, size)
-    lbp_features = extract_lbp(path, size)
-    return np.concatenate((hog_features, lbp_features))
+    return np.clip(channel, 0, 1)
 
-def batch_extract(paths, extractor, label=""):
-    """Extract features for a list of paths with progress printing."""
-    out = []
-    n = len(paths)
-    for i, p in enumerate(paths):
-        if i % 1000 == 0:
-            print(f"  {label}: {i}/{n}")
-        out.append(extractor(p))
-    return np.array(out)
+def crop_largest_face(img, margin=0.20):
+    """Crop the largest detected face; return the original image if no face is found.
 
-# SVM training
-def train_linear_SVM(X_train, y_train):
-    """Train a linear SVM classifier."""
-    classifier = svm.SVC(kernel='linear', class_weight='balanced')
-    classifier.fit(X_train, y_train)
-    return classifier
-
-def train_rbf_SVM(X_train, y_train, C=10):
-    """Train an RBF-kernel SVM classifier."""
-    classifier = svm.SVC(kernel='rbf', C=C, gamma='scale',
-                         class_weight='balanced', random_state=SEED)
-    classifier.fit(X_train, y_train)
-    return classifier
-
-# MLP training
-def train_MLP(X_train, y_train, hidden_layer_sizes=(512, 256), max_iter=100):
-    """Train a Multi-layer Perceptron classifier."""
-    classifier = MLPClassifier(
-        hidden_layer_sizes=hidden_layer_sizes,
-        activation='relu',
-        solver='adam',
-        max_iter=max_iter,
-        early_stopping=True,
-        random_state=SEED
-    )
-    classifier.fit(X_train, y_train)
-    return classifier
-
-# Evaluation
-def evaluate(name, y_true, y_pred, train_time=None, model_path=None):
-    """Print accuracy and full classification report."""
-    acc = accuracy_score(y_true, y_pred)
-    print(f"Model: {name}")
-    if train_time:
-        print(f"Training Time: {train_time:.1f} seconds")
-    if model_path and os.path.exists(model_path):
-        size = os.path.getsize(model_path) / (1024 * 1024)
-        print(f"Model Size: {size:.2f} MB")
-    print(f"Accuracy: {acc:.4f}")
-    print("Classification Report:")
-    print(metrics.classification_report(
-        y_true, y_pred,
-        target_names=[AGE_LABELS[i] for i in range(4)]
-    ))
-    return acc
-
-def plot_confusion_matrix(name, y_true, y_pred, ax=None):
-    """Plot a labelled confusion matrix."""
-    cm = confusion_matrix(y_true, y_pred)
-    disp = ConfusionMatrixDisplay(
-        cm, display_labels=[AGE_LABELS[i] for i in range(4)]
-    )
-    disp.plot(ax=ax or plt.gca(), colorbar=False, xticks_rotation=30)
-    if ax:
-        ax.set_title(name)
-
-def qualitative_grid(test_paths, test_labels, predictions_dict, n=8):
-    """Show n random test images with GT + all model predictions."""
-    idxs = random.sample(range(len(test_paths)), n)
-    ncols = 4
-    nrows = int(np.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 4.5))
-    for ax, idx in zip(axes.flatten(), idxs):
-        img = load_image(test_paths[idx])
-        ax.imshow(img)
-        ax.axis('off')
-        gt = AGE_LABELS[test_labels[idx]]
-        lines = [f"GT: {gt}"]
-        for mname, preds in predictions_dict.items():
-            mark = "✓" if preds[idx] == test_labels[idx] else "✗"
-            lines.append(f"{mark} {mname}: {AGE_LABELS[preds[idx]]}")
-        ax.set_title("\n".join(lines), fontsize=7, loc='left')
-    plt.tight_layout()
-    plt.show()
-
-# Class weights
-def get_class_weights(labels):
-    """Compute balanced class weights to handle imbalance."""
-    arr = np.array(labels)
-    classes = np.unique(arr)
-    w = compute_class_weight('balanced', classes=classes, y=arr)
-    return dict(zip(classes, w))
-
-# Scaler helper
-def fit_scaler(X_tr, X_val, X_te):
-    """Fit a StandardScaler on training data and apply to val/test."""
-    sc = StandardScaler()
-    return sc.fit_transform(X_tr), sc.transform(X_val), sc.transform(X_te), sc
-
-# PyTorch transforms
-def get_transforms(size=IMAGE_SIZE, augment=False):
-    """Build torchvision transform pipeline."""
-    mean = [0.485, 0.456, 0.406]
-    std  = [0.229, 0.224, 0.225]
-    if augment:
-        return transforms.Compose([
-            transforms.Resize(size),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
-            transforms.ToTensor(),
-            transforms.Normalize(mean, std),
-        ])
-    return transforms.Compose([
-        transforms.Resize(size),
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
-    ])
-
-# PyTorch Dataset
-class AgeDataset(Dataset):
-    """Custom PyTorch Dataset for Age Group Detection."""
-    def __init__(self, paths, labels, transform=None):
-        self.paths     = paths
-        self.labels    = labels
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, idx):
-        img = Image.open(self.paths[idx]).convert('RGB')
-        if self.transform:
-            img = self.transform(img)
-        return img, self.labels[idx]
-
-# PyTorch training
-def train_epoch(model, loader, criterion, optimizer, device):
-    """Single training epoch: forward pass, loss, backward, optimiser step."""
-    model.train()
-    total_loss = 0
-    for imgs, lbls in loader:
-        imgs, lbls = imgs.to(device), lbls.to(device)
-        optimizer.zero_grad()
-        loss = criterion(model(imgs), lbls)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-    return total_loss / len(loader)
-
-
-@torch.no_grad()
-def eval_epoch(model, loader, device):
+    Reference: repurposed from Lab_05 code cell 17.
     """
-    Single evaluation epoch.
-    Returns (accuracy: float, predictions: np.ndarray).
+    gray = color.rgb2gray(img)
+    gray_u8 = img_as_ubyte(gray)
+    face_cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    )
+    faces = face_cascade.detectMultiScale(gray_u8, scaleFactor=1.1, minNeighbors=5)
+
+    if len(faces) == 0:
+        return img
+
+    x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
+    pad = int(max(w, h) * margin)
+    y0 = max(0, y - pad)
+    y1 = min(img.shape[0], y + h + pad)
+    x0 = max(0, x - pad)
+    x1 = min(img.shape[1], x + w + pad)
+
+    return img[y0:y1, x0:x1]
+
+def preprocess_classical(path, image_size=(128, 128), contrast=None, crop_face=False):
+    """Preprocess one image for HOG/SIFT/SVM/MLP-style classical models.
+
+    Reference: new combination of tutorial pieces: image loading from Lab_02
+    code cell 3, grayscale conversion from Lab_02 code cell 21, resizing adapted
+    from Lab_05 code cell 20, and optional contrast from Lab_02 code cell 19.
     """
-    model.eval()
-    correct = total = 0
-    all_preds = []
-    for imgs, lbls in loader:
-        imgs, lbls = imgs.to(device), lbls.to(device)
-        preds = model(imgs).argmax(1)
-        correct   += (preds == lbls).sum().item()
-        total     += lbls.size(0)
-        all_preds.extend(preds.cpu().numpy())
-    return correct / total, np.array(all_preds)
+    img = read_rgb(path)
 
+    if crop_face:
+        img = crop_largest_face(img)
 
-def train_model(model, train_dl, val_dl, criterion, optimizer, scheduler,
-                num_epochs, device, save_path):
-    """Full training loop with best-model checkpointing (saved to save_path)."""
-    best_acc = 0
-    history  = {"loss": [], "val_acc": []}
-    for ep in range(num_epochs):
-        loss = train_epoch(model, train_dl, criterion, optimizer, device)
-        acc, _ = eval_epoch(model, val_dl, device)
-        if scheduler:
-            scheduler.step()
-        history["loss"].append(loss)
-        history["val_acc"].append(acc)
-        if acc > best_acc:
-            best_acc = acc
-            torch.save(model.state_dict(), save_path)
-        if (ep + 1) % 5 == 0:
-            print(f"  Ep {ep+1:>3}/{num_epochs}  "
-                  f"loss={loss:.4f}  val_acc={acc:.4f}  best={best_acc:.4f}")
-    print(f"\n  Best val acc: {best_acc:.4f}  ->  {save_path}")
-    return history
+    gray = color.rgb2gray(img)
+    gray = resize_image(gray, image_size)
+    gray = adjust_contrast(gray, method=contrast)
 
+    return gray.astype(np.float32)
 
-def plot_history(history, title=""):
-    """Plot training loss and validation accuracy curves."""
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4))
-    a1.plot(history["loss"]); a1.set_title("Train Loss"); a1.set_xlabel("Epoch")
-    a2.plot(history["val_acc"]); a2.set_title("Val Accuracy"); a2.set_xlabel("Epoch")
-    plt.suptitle(title)
-    plt.tight_layout()
-    plt.show()
+def preprocess_cnn(
+    path, image_size=(224, 224), contrast=None, crop_face=False, imagenet_norm=False
+):
+    """Preprocess one image for a CNN if you are not using torchvision transforms.
+
+    Reference: new NumPy/skimage version inspired by Lab_08 code cell 7, where
+    CNN inputs are resized/cropped, converted to tensors, and normalized. This
+    function keeps the output as a NumPy array for visual testing and later reuse.
+    """
+    img = read_rgb(path)
+
+    if crop_face:
+        img = crop_largest_face(img)
+
+    img = resize_image(img, image_size)
+    img = adjust_contrast(img, method=contrast)
+    img = img.astype(np.float32)
+
+    if imagenet_norm:
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        img = (img - mean) / std
+
+    return img
+
+def preprocess_many(paths, preprocess_fn, max_images=None, **kwargs):
+    """Apply a preprocessing function to many image paths and stack the results."""
+    selected_paths = paths if max_images is None else paths[:max_images]
+    images = [preprocess_fn(path, **kwargs) for path in selected_paths]
+    return np.stack(images)
+
+def flatten_images(images):
+    """Flatten image arrays for scikit-learn classifiers."""
+    return images.reshape(images.shape[0], -1)
