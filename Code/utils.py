@@ -8,7 +8,7 @@ from sklearn.model_selection import train_test_split
 from skimage import color, exposure, img_as_float, img_as_ubyte, transform
 from skimage.io import imread
 
-SEED = 42
+SEED = 104
 random.seed(SEED)
 np.random.seed(SEED)
 
@@ -39,9 +39,10 @@ def get_project_paths(root=None):
     """Return the standard coursework paths used by the model notebooks."""
     root = Path(root) if root is not None else find_project_root()
     data_dir = root / "CW_Dataset"
-    code2_dir = root / "Code 2"
+    personal_dir = root / "Personal_Dataset"
+    code_dir = root / "Code"
     models_dir = root / "Models"
-    output_dir = code2_dir / "outputs"
+    output_dir = code_dir / "outputs"
 
     models_dir.mkdir(exist_ok=True)
     output_dir.mkdir(exist_ok=True)
@@ -53,6 +54,8 @@ def get_project_paths(root=None):
         "TRAIN_LBL": data_dir / "train" / "train_labels.txt",
         "TEST_IMGS": data_dir / "test",
         "TEST_LBL": data_dir / "test" / "test_labels.txt",
+        "PERSONAL_IMGS": personal_dir,
+        "PERSONAL_LBL": personal_dir / "personal_labels.txt.txt",
         "MODELS_DIR": models_dir,
         "OUTPUT_DIR": output_dir,
     }
@@ -86,6 +89,29 @@ def load_coursework_dataset(root=None, verbose=True):
         print("Test class distribution:", Counter(test_labels))
 
     return train_paths, train_labels, test_paths, test_labels
+
+def load_personal_dataset(root=None, verbose=True):
+    """Load the uncropped personal/in-the-wild dataset paths and labels."""
+    paths = get_project_paths(root)
+    label_file = paths["PERSONAL_LBL"]
+
+    if not label_file.exists():
+        fallback = paths["PERSONAL_IMGS"] / "personal_labels.txt"
+        if fallback.exists():
+            label_file = fallback
+        else:
+            raise FileNotFoundError(
+                "Could not find personal labels. Expected "
+                f"{paths['PERSONAL_LBL']} or {fallback}."
+            )
+
+    personal_paths, personal_labels = load_labels(paths["PERSONAL_IMGS"], label_file)
+
+    if verbose:
+        print("Personal samples:", len(personal_paths))
+        print("Personal class distribution:", Counter(personal_labels))
+
+    return personal_paths, personal_labels
 
 # DATA SPLITTING
 
